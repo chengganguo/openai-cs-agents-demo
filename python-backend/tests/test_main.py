@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import main
 from enterprise_support.identity import RequestIdentity
+from enterprise_support.production import production_readiness_checks
 from persistent_store import PersistentStore
 from server import EnterpriseSupportServer
 
@@ -217,6 +218,27 @@ def test_runner_state_endpoints_require_operator_role(monkeypatch) -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_production_readiness_allows_roboage_server_to_server_mode(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_MODE", "roboage")
+    monkeypatch.setenv("ROBOAGE_INTERNAL_TOKEN", "service-token")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://agent:secret@postgres:5432/agent")
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", "fernet-key")
+    monkeypatch.setenv("CONNECTOR_MODE", "live")
+    monkeypatch.setenv("DOCUMENT_PROCESSING_MODE", "async")
+    monkeypatch.setenv("OBJECT_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("S3_BUCKET", "enterprise-agent")
+    monkeypatch.setenv("CLAMAV_COMMAND", "clamscan")
+    monkeypatch.setenv("OPENAI_TRACING_DISABLED", "1")
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.roboage.net")
+
+    checks = production_readiness_checks()
+
+    assert {check.name for check in checks} >= {"auth_mode", "roboage_service_token"}
+    assert "oidc_configuration" not in {check.name for check in checks}
+    assert all(check.passed for check in checks)
 
 
 @pytest.mark.asyncio

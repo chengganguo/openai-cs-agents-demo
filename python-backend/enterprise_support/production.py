@@ -18,26 +18,12 @@ def production_readiness_checks() -> list[ReadinessCheck]:
 
     database_url = os.getenv("DATABASE_URL", "")
     cors_origins = os.getenv("CORS_ORIGINS", "")
+    auth_mode = os.getenv("AUTH_MODE", "").strip().lower()
     checks = [
-        ReadinessCheck("auth_mode", os.getenv("AUTH_MODE") == "oidc", "AUTH_MODE must be oidc"),
         ReadinessCheck(
-            "oidc_configuration",
-            all(os.getenv(name) for name in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL")),
-            "OIDC issuer, audience, and JWKS URL are required",
-        ),
-        ReadinessCheck(
-            "oidc_browser_flow",
-            all(
-                os.getenv(name)
-                for name in (
-                    "OIDC_AUTHORIZATION_ENDPOINT",
-                    "OIDC_TOKEN_ENDPOINT",
-                    "OIDC_CLIENT_ID",
-                    "OIDC_REDIRECT_URI",
-                    "SESSION_SIGNING_KEY",
-                )
-            ),
-            "OIDC browser flow and session signing settings are required",
+            "auth_mode",
+            auth_mode in {"oidc", "roboage"},
+            "AUTH_MODE must be oidc or roboage",
         ),
         ReadinessCheck(
             "database",
@@ -85,6 +71,41 @@ def production_readiness_checks() -> list[ReadinessCheck]:
             "DEV_AUTH_TOKEN is ignored outside development mode",
         ),
     ]
+    if auth_mode == "roboage":
+        checks.append(
+            ReadinessCheck(
+                "roboage_service_token",
+                bool(os.getenv("ROBOAGE_INTERNAL_TOKEN")),
+                "ROBOAGE_INTERNAL_TOKEN is required for RoboAge server-to-server mode",
+            )
+        )
+    else:
+        checks.extend(
+            [
+                ReadinessCheck(
+                    "oidc_configuration",
+                    all(
+                        os.getenv(name)
+                        for name in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL")
+                    ),
+                    "OIDC issuer, audience, and JWKS URL are required",
+                ),
+                ReadinessCheck(
+                    "oidc_browser_flow",
+                    all(
+                        os.getenv(name)
+                        for name in (
+                            "OIDC_AUTHORIZATION_ENDPOINT",
+                            "OIDC_TOKEN_ENDPOINT",
+                            "OIDC_CLIENT_ID",
+                            "OIDC_REDIRECT_URI",
+                            "SESSION_SIGNING_KEY",
+                        )
+                    ),
+                    "OIDC browser flow and session signing settings are required",
+                ),
+            ]
+        )
     return checks
 
 
