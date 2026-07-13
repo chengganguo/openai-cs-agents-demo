@@ -1,0 +1,157 @@
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+from chatkit.types import ThreadMetadata
+from fastapi.testclient import TestClient
+
+import main
+from enterprise_support.identity import RequestIdentity
+from persistent_store import PersistentStore
+from server import EnterpriseSupportServer
+
+
+def test_health_reports_zhipu_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "ZAI_SETTINGS",
+        SimpleNamespace(configured=True, agent_model="glm-test"),
+    )
+
+    response = TestClient(main.app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "healthy",
+        "service": "enterprise-ai-support-agent",
+        "model_provider": "zhipu",
+        "model": "glm-test",
+        "configured": True,
+    }
+
+
+def test_chat_endpoint_rejects_missing_zai_key(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "ZAI_SETTINGS",
+        SimpleNamespace(configured=False, agent_model="glm-test"),
+    )
+
+    response = TestClient(main.app).post(
+        "/chatkit",
+        content=b"{}",
+        headers={"Authorization": "Bearer local-dev-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "model_provider_not_configured"
+
+
+def test_chat_endpoint_requires_authentication() -> None:
+    response = TestClient(main.app).post("/chatkit", content=b"{}")
+
+    assert response.status_code == 401
+
+
+def test_oidc_login_uses_pkce_and_http_only_flow_cookie(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("SESSION_SIGNING_KEY", "test-session-signing-key-with-sufficient-length")
+    monkeypatch.setenv("OIDC_AUTHORIZATION_ENDPOINT", "https://idp.example.com/authorize")
+    monkeypatch.setenv("OIDC_CLIENT_ID", "client-id")
+    monkeypatch.setenv("OIDC_REDIRECT_URI", "http://localhost:8000/auth/callback")
+
+    response = TestClient(main.app).get(
+        "/auth/login?return_to=/admin/quality",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("https://idp.example.com/authorize?")
+    assert "code_challenge_method=S256" in response.headers["location"]
+    assert "oidc_flow=" in response.headers["set-cookie"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+
+
+def test_chat_endpoint_separates_portal_and_admin_surfaces(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "ZAI_SETTINGS",
+        SimpleNamespace(configured=True, agent_model="glm-test"),
+    )
+    monkeypatch.setenv(
+        "DEV_USER_ROLES",
+        "tenant_admin,support_agent,knowledge_editor,end_user",
+    )
+
+    class CapturingServer:
+        def __init__(self) -> None:
+            self.contexts = []
+
+        async def process(self, payload, context):
+            self.contexts.append(context)
+            return SimpleNamespace(json="{}")
+
+    server = CapturingServer()
+    main.app.dependency_overrides[main.get_server] = lambda: server
+    client = TestClient(main.app)
+
+    try:
+        portal_response = client.post(
+            "/chatkit",
+            content=b"{}",
+            headers={
+                "Authorization": "Bearer local-dev-token",
+                "X-Client-Surface": "portal",
+            },
+        )
+        admin_response = client.post(
+            "/chatkit",
+            content=b"{}",
+            headers={
+                "Authorization": "Bearer local-dev-token",
+                "X-Client-Surface": "admin",
+            },
+        )
+
+        assert portal_response.status_code == 200
+        assert admin_response.status_code == 200
+        assert server.contexts[0]["client_surface"] == "portal"
+        assert server.contexts[0]["include_runner_events"] is False
+        assert "tenant_admin" not in server.contexts[0]["identity"].roles
+        assert server.contexts[1]["client_surface"] == "admin"
+        assert server.contexts[1]["include_runner_events"] is True
+        assert "tenant_admin" in server.contexts[1]["identity"].roles
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_runner_state_endpoints_require_operator_role(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_USER_ROLES", "end_user")
+
+    response = TestClient(main.app).get(
+        "/chatkit/bootstrap",
+        headers={"Authorization": "Bearer local-dev-token"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_restores_latest_authorized_thread() -> None:
+    store = PersistentStore(":memory:")
+    server = EnterpriseSupportServer(store=store)
+    identity = RequestIdentity(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        roles=frozenset({"end_user"}),
+    )
+    context = {"identity": identity}
+    older = ThreadMetadata(id="thr_older", created_at=datetime.now() - timedelta(days=1))
+    latest = ThreadMetadata(id="thr_latest", created_at=datetime.now())
+    await store.save_thread(older, context)
+    await store.save_thread(latest, context)
+
+    result = await main.chatkit_bootstrap(identity, server)
+
+    assert result["thread_id"] == latest.id
+    store.close()
