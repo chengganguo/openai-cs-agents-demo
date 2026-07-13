@@ -690,6 +690,71 @@ class EnterpriseSupportServer(ChatKitServer[dict[str, Any]]):
             "guardrails": [g.model_dump() for g in state.guardrails],
         }
 
+    async def respond_json(
+        self,
+        *,
+        message: str,
+        context: dict[str, Any],
+        thread_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Run one turn and return a compact JSON response for RoboAge.
+
+        ChatKit remains the native interactive protocol for the standalone app.
+        RoboAge uses this helper for a server-to-server JSON integration while
+        reusing the same thread state, guardrails, handoffs, tools, and traces.
+        """
+
+        thread = await self._ensure_thread(thread_id, context)
+        state = self._state_for_thread(thread.id, context)
+        if history and not state.input_items:
+            for item in history[-24:]:
+                role = "assistant" if item.get("role") == "assistant" else "user"
+                content = str(item.get("content") or "").strip()
+                if content:
+                    state.input_items.append({"role": role, "content": content})
+
+        user_message = UserMessageItem.model_validate(
+            {
+                "id": self.store.generate_item_id("message", thread, context),
+                "thread_id": thread.id,
+                "created_at": datetime.now(),
+                "content": [{"type": "input_text", "text": message}],
+                "inference_options": {},
+            }
+        )
+
+        delta_text: List[str] = []
+        done_text = ""
+        async for event in self.respond(thread, user_message, context):
+            if isinstance(event, ThreadItemUpdatedEvent) and isinstance(
+                event.update, AssistantMessageContentPartTextDelta
+            ):
+                delta_text.append(event.update.delta)
+            elif isinstance(event, ThreadItemDoneEvent) and isinstance(
+                event.item, AssistantMessageItem
+            ):
+                done_text = "".join(
+                    part.text
+                    for part in event.item.content
+                    if isinstance(getattr(part, "text", None), str)
+                )
+
+        answer = done_text or "".join(delta_text)
+        snapshot = await self.snapshot(thread.id, context)
+        state = self._state_for_thread(thread.id, context)
+        return {
+            "answer": answer,
+            "thread_id": thread.id,
+            "current_agent": state.current_agent_name,
+            "context": snapshot["context"],
+            "citations": [
+                {"source": source}
+                for source in state.context.source_refs
+                if isinstance(source, str) and source
+            ],
+        }
+
     # -- Streaming state updates to UI listeners ---------------------------------
     def _register_listener(self, thread_id: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()

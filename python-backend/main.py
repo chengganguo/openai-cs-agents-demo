@@ -3,7 +3,7 @@ from __future__ import annotations as _annotations
 import json
 import os
 import time
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -15,6 +15,7 @@ from chatkit.server import StreamingResult
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 
 from enterprise_support.agents import (
     account_billing_agent,
@@ -108,6 +109,28 @@ AgentOperator = Annotated[
 ]
 
 
+class RoboAgeChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20_000)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def trim_content(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+class RoboAgeChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=20_000)
+    history: list[RoboAgeChatMessage] = Field(default_factory=list, max_length=24)
+    thread_id: str | None = Field(default=None, max_length=200)
+    surface: str = Field(default="roboage_workspace", max_length=80)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def trim_message(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
 def get_server() -> EnterpriseSupportServer:
     return chat_server
 
@@ -147,6 +170,37 @@ async def chatkit_endpoint(
     if hasattr(result, "json"):
         return Response(content=result.json, media_type="application/json")
     return Response(content=result)
+
+
+@app.post("/v1/roboage/chat")
+async def roboage_chat_endpoint(
+    payload: RoboAgeChatRequest,
+    request: Request,
+    identity: AgentOperator,
+    server: EnterpriseSupportServer = Depends(get_server),
+) -> Dict[str, Any]:
+    if not ZAI_SETTINGS.configured:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "model_provider_not_configured",
+                "message": "Set ZAI_API_KEY in python-backend/.env and restart the server.",
+            },
+        )
+
+    result = await server.respond_json(
+        message=payload.message,
+        thread_id=payload.thread_id,
+        history=[item.model_dump() for item in payload.history],
+        context={
+            "request": request,
+            "identity": identity,
+            "client_surface": payload.surface,
+            "include_runner_events": False,
+            "request_id": request.state.request_id,
+        },
+    )
+    return result
 
 
 @app.get("/chatkit/state")

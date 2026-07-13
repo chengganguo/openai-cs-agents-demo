@@ -174,8 +174,36 @@ async def get_request_identity(
     authorization: Annotated[str | None, Header()] = None,
     request: Request = None,
     enterprise_session: Annotated[str | None, Cookie()] = None,
+    x_roboage_tenant_id: Annotated[
+        str | None, Header(alias="X-RoboAge-Tenant-Id")
+    ] = None,
+    x_roboage_user_id: Annotated[
+        str | None, Header(alias="X-RoboAge-User-Id")
+    ] = None,
+    x_roboage_roles: Annotated[
+        str | None, Header(alias="X-RoboAge-Roles")
+    ] = None,
 ) -> RequestIdentity:
     settings = AuthSettings.from_env()
+    if settings.mode == "roboage":
+        token = _bearer_token(authorization)
+        expected_token = os.getenv("ROBOAGE_INTERNAL_TOKEN") or settings.dev_token
+        if not expected_token:
+            raise RuntimeError("ROBOAGE_INTERNAL_TOKEN is required in roboage mode")
+        if not secrets.compare_digest(token, expected_token):
+            raise _unauthorized("Invalid RoboAge service token")
+        if not x_roboage_tenant_id or not x_roboage_user_id:
+            raise _unauthorized("Missing RoboAge tenant or user headers")
+        roles = frozenset(
+            role.strip()
+            for role in (x_roboage_roles or "").split(",")
+            if role.strip() in ALLOWED_ROLES
+        )
+        return RequestIdentity(
+            tenant_id=x_roboage_tenant_id,
+            user_id=x_roboage_user_id,
+            roles=roles,
+        )
     if settings.mode == "dev":
         token = _bearer_token(authorization)
         if token != settings.dev_token:

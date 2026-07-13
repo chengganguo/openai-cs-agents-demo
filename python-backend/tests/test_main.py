@@ -36,6 +36,7 @@ def test_chat_endpoint_rejects_missing_zai_key(monkeypatch) -> None:
         "ZAI_SETTINGS",
         SimpleNamespace(configured=False, agent_model="glm-test"),
     )
+    monkeypatch.setenv("AUTH_MODE", "dev")
 
     response = TestClient(main.app).post(
         "/chatkit",
@@ -47,10 +48,90 @@ def test_chat_endpoint_rejects_missing_zai_key(monkeypatch) -> None:
     assert response.json()["error"] == "model_provider_not_configured"
 
 
-def test_chat_endpoint_requires_authentication() -> None:
+def test_chat_endpoint_requires_authentication(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "dev")
     response = TestClient(main.app).post("/chatkit", content=b"{}")
 
     assert response.status_code == 401
+
+
+def test_roboage_chat_endpoint_uses_roboage_identity_and_json_contract(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "ZAI_SETTINGS",
+        SimpleNamespace(configured=True, agent_model="glm-test"),
+    )
+    monkeypatch.setenv("AUTH_MODE", "roboage")
+    monkeypatch.setenv("ROBOAGE_INTERNAL_TOKEN", "service-token")
+
+    class CapturingServer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def respond_json(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "answer": "企业版 SLA 为 99.9%。",
+                "thread_id": "thread-1",
+                "citations": [{"source": "sla.pdf"}],
+            }
+
+    server = CapturingServer()
+    main.app.dependency_overrides[main.get_server] = lambda: server
+    client = TestClient(main.app)
+
+    try:
+        response = client.post(
+            "/v1/roboage/chat",
+            json={
+                "message": "企业版 SLA 是什么？",
+                "history": [{"role": "user", "content": "上一轮问题"}],
+                "thread_id": "thread-1",
+            },
+            headers={
+                "Authorization": "Bearer service-token",
+                "X-RoboAge-Tenant-Id": "enterprise-1",
+                "X-RoboAge-User-Id": "user-1",
+                "X-RoboAge-Roles": "tenant_admin,support_agent",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["answer"] == "企业版 SLA 为 99.9%。"
+        assert response.json()["thread_id"] == "thread-1"
+        call = server.calls[0]
+        assert call["message"] == "企业版 SLA 是什么？"
+        assert call["thread_id"] == "thread-1"
+        assert call["history"] == [{"role": "user", "content": "上一轮问题"}]
+        assert call["context"]["identity"].tenant_id == "enterprise-1"
+        assert call["context"]["identity"].user_id == "user-1"
+        assert call["context"]["include_runner_events"] is False
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_roboage_chat_endpoint_rejects_missing_model_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "ZAI_SETTINGS",
+        SimpleNamespace(configured=False, agent_model="glm-test"),
+    )
+    monkeypatch.setenv("AUTH_MODE", "roboage")
+    monkeypatch.setenv("ROBOAGE_INTERNAL_TOKEN", "service-token")
+
+    response = TestClient(main.app).post(
+        "/v1/roboage/chat",
+        json={"message": "企业版 SLA 是什么？"},
+        headers={
+            "Authorization": "Bearer service-token",
+            "X-RoboAge-Tenant-Id": "enterprise-1",
+            "X-RoboAge-User-Id": "user-1",
+            "X-RoboAge-Roles": "tenant_admin,support_agent",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "model_provider_not_configured"
 
 
 def test_oidc_login_uses_pkce_and_http_only_flow_cookie(monkeypatch) -> None:
@@ -82,6 +163,7 @@ def test_chat_endpoint_separates_portal_and_admin_surfaces(monkeypatch) -> None:
         "DEV_USER_ROLES",
         "tenant_admin,support_agent,knowledge_editor,end_user",
     )
+    monkeypatch.setenv("AUTH_MODE", "dev")
 
     class CapturingServer:
         def __init__(self) -> None:
@@ -126,6 +208,7 @@ def test_chat_endpoint_separates_portal_and_admin_surfaces(monkeypatch) -> None:
 
 
 def test_runner_state_endpoints_require_operator_role(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "dev")
     monkeypatch.setenv("DEV_USER_ROLES", "end_user")
 
     response = TestClient(main.app).get(

@@ -92,8 +92,9 @@ npm run dev:next
 | `OPENAI_TRACING_DISABLED` | 禁用 OpenAI tracing，避免使用智谱 Key 上传 trace | `1` |
 | `CORS_ORIGINS` | 允许的前端来源，逗号分隔 | `http://localhost:3000` |
 | `NEXT_PUBLIC_CHATKIT_DOMAIN_KEY` | ChatKit 域名密钥 | 本地开发占位值 |
-| `AUTH_MODE` | 身份模式：`dev` 或 `oidc` | `dev` |
+| `AUTH_MODE` | 身份模式：`dev`、`oidc` 或 RoboAge 服务端调用模式 `roboage` | `dev` |
 | `DEV_AUTH_TOKEN` | 本地开发令牌 | `local-dev-token` |
+| `ROBOAGE_INTERNAL_TOKEN` | `AUTH_MODE=roboage` 时校验 RoboAge 服务端调用；需与 RoboAge `ENTERPRISE_SUPPORT_AGENT_INTERNAL_TOKEN` 一致 | 空 |
 | `DEV_TENANT_ID` / `DEV_USER_ID` | 本地开发租户与用户 | `tenant_acme_cn` / `local-admin` |
 | `DEV_USER_ROLES` | 本地开发角色，逗号分隔 | 管理员、编辑、审核、客服、终端用户 |
 | `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_JWKS_URL` | 正式 OIDC 验证配置 | OIDC 模式必填 |
@@ -111,6 +112,33 @@ npm run dev:next
 | `NEXT_PUBLIC_DEFAULT_APP_SURFACE` | 根路径默认入口：`support` 或 `admin` | `support` |
 
 模型调用通过智谱的 OpenAI 兼容 Chat Completions 接口完成。业务 Agent 使用流式响应与 Function Calling；护栏使用智谱 JSON 模式并在本地执行 Pydantic 校验。若护栏输出无法解析，系统会默认拦截而不是放行。
+
+## RoboAge 服务端集成
+
+RoboAge 工作台通过服务端调用本后端，不直接暴露模型 Key 或 Agent 服务地址到浏览器。生产建议为 RoboAge 单独部署或配置 `AUTH_MODE=roboage`，并设置 `ROBOAGE_INTERNAL_TOKEN`，该值需与 RoboAge 的 `ENTERPRISE_SUPPORT_AGENT_INTERNAL_TOKEN` 一致。
+
+RoboAge 知识源同步使用：
+
+```http
+POST /v1/knowledge/documents
+```
+
+RoboAge 工作台对话使用：
+
+```http
+POST /v1/roboage/chat
+```
+
+请求头由 RoboAge 服务端注入：
+
+```http
+Authorization: Bearer <ROBOAGE_INTERNAL_TOKEN>
+X-RoboAge-Tenant-Id: <enterprise id>
+X-RoboAge-User-Id: <user id>
+X-RoboAge-Roles: tenant_admin,support_agent
+```
+
+响应格式为 `{ answer, thread_id, current_agent, context, citations }`。
 
 ## 演示对话
 

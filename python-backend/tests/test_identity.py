@@ -37,6 +37,39 @@ async def test_development_identity_rejects_invalid_token(monkeypatch) -> None:
     assert exc_info.value.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_roboage_identity_uses_signed_service_headers(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "roboage")
+    monkeypatch.setenv("ROBOAGE_INTERNAL_TOKEN", "service-token")
+
+    identity = await get_request_identity(
+        "Bearer service-token",
+        x_roboage_tenant_id="enterprise-1",
+        x_roboage_user_id="user-1",
+        x_roboage_roles="tenant_admin,support_agent,unknown_role",
+    )
+
+    assert identity.tenant_id == "enterprise-1"
+    assert identity.user_id == "user-1"
+    assert identity.roles == frozenset({"tenant_admin", "support_agent"})
+
+
+@pytest.mark.asyncio
+async def test_roboage_identity_rejects_invalid_service_token(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "roboage")
+    monkeypatch.setenv("ROBOAGE_INTERNAL_TOKEN", "service-token")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_request_identity(
+            "Bearer wrong-token",
+            x_roboage_tenant_id="enterprise-1",
+            x_roboage_user_id="user-1",
+            x_roboage_roles="tenant_admin",
+        )
+
+    assert exc_info.value.status_code == 401
+
+
 def test_portal_identity_drops_administrative_roles() -> None:
     identity = RequestIdentity(
         tenant_id="tenant-a",
